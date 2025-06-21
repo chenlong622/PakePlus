@@ -5,16 +5,17 @@
     "windows": ["main", "PreView"],
     "remote": {
         "urls": [
-            "https://**",
-            "file://**",
-            "http://**",
-            "asset://localhost/**",
-            "https://api.github.com/**",
-            "https://payjs.cn/**"
+            "https://*",
+            "file://*",
+            "http://*",
+            "asset://localhost/*",
+            "https://api.github.com/*",
+            "https://payjs.cn/*"
         ]
     },
     "permissions": [
         "core:default",
+        "notification:default",
         "core:app:allow-default-window-icon",
         "core:app:allow-app-hide",
         "core:app:allow-app-show",
@@ -40,7 +41,6 @@
         "process:default",
         "process:allow-restart",
         "process:allow-exit",
-        "opener:default",
         "http:allow-fetch",
         "http:default",
         "http:allow-fetch-cancel",
@@ -83,6 +83,7 @@
                 "$DOWNLOAD/**",
                 "$ASSETS/**",
                 "$TEMP/**",
+                "$CACHE/**",
                 "asset://localhost/**"
             ]
         },

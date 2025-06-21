@@ -2,7 +2,7 @@
 import { onMounted } from 'vue'
 import { locale as osLocale } from '@tauri-apps/plugin-os'
 import { useI18n } from 'vue-i18n'
-import { isTauri, isMobile, buildTime } from './utils/common'
+import { isTauri, isMobile, chageTheme } from './utils/common'
 import Updater from './components/Updater.vue'
 
 const { locale } = useI18n()
@@ -42,19 +42,6 @@ const disableRightClick = () => {
     }
 }
 
-const chageTheme = (theme: string) => {
-    if (theme === 'light') {
-        document.documentElement.setAttribute('theme', 'light')
-        document.querySelector('html')?.classList.remove('dark')
-        document.querySelector('html')?.classList.add('light')
-    } else {
-        document.documentElement.setAttribute('theme', 'dark')
-        document.querySelector('html')?.classList.remove('light')
-        document.querySelector('html')?.classList.add('dark')
-    }
-    localStorage.setItem('theme', theme)
-}
-
 const initEnv = async () => {
     // listen theme change
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
@@ -62,9 +49,8 @@ const initEnv = async () => {
         const listener = (e: any) => {
             const newTheme = e.matches ? 'dark' : 'light'
             console.log('theme change', newTheme)
-            chageTheme(newTheme) // 确保 chageTheme 函数已定义
+            chageTheme(newTheme)
         }
-        // 优先使用 addEventListener，否则回退到 addListener
         if (mediaQuery.addEventListener) {
             mediaQuery.addEventListener('change', listener)
         } else if (mediaQuery.addListener) {

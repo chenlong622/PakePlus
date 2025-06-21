@@ -1,13 +1,25 @@
-use crate::command::model::find_port;
 use crate::command::model::ServerState;
 use base64::prelude::*;
+use futures::StreamExt;
+use reqwest::Client;
+use serde::Serialize;
+use std::env;
+use std::fs;
 use std::fs::File;
+use std::io;
 use std::io::Read;
+use std::io::Write;
+use std::net::TcpListener;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tauri::{path::BaseDirectory, utils::config::WindowConfig, AppHandle, LogicalSize, Manager};
+use tauri::WindowEvent;
+use tauri::{
+    path::BaseDirectory, utils::config::WindowConfig, AppHandle, Emitter, LogicalSize, Manager,
+};
 use tauri_plugin_http::reqwest;
+use tauri_plugin_notification::NotificationExt;
 use walkdir::WalkDir;
 use warp::Filter;
 use zip::write::FileOptions;
@@ -25,7 +37,7 @@ pub async fn start_server(
     }
     let path_clone = path.clone();
     let port = find_port().unwrap();
-    println!("port: {}", port);
+    // println!("port: {}", port);
     let server_handle = tokio::spawn(async move {
         let route = warp::fs::dir(path_clone)
             .map(|reply| {
@@ -150,11 +162,16 @@ pub async fn preview_from_config(
     // custom js
     contents += js_content.as_str();
     if !resize {
-        let _window = tauri::WebviewWindowBuilder::from_config(&handle, &config)
+        let pre_window = tauri::WebviewWindowBuilder::from_config(&handle, &config)
             .unwrap()
             .initialization_script(contents.as_str())
             .build()
             .unwrap();
+        pre_window.on_window_event(move |event| {
+            if let WindowEvent::Destroyed = event {
+                handle.emit("stop_server", "0").unwrap();
+            }
+        });
     }
 }
 
@@ -417,27 +434,49 @@ pub async fn update_init_rs(
     return encoded_contents;
 }
 
-// #[tauri::command]
-// pub async fn download_file_by_binary(
-//     app: AppHandle,
-//     params: BinaryDownloadParams,
-// ) -> Result<(), String> {
-//     let window: Window = app.get_window("pake").unwrap();
-//     show_toast(&window, &get_download_message(MessageType::Start));
-//     let output_path = api::path::download_dir().unwrap().join(params.filename);
-//     let file_path = check_file_or_append(output_path.to_str().unwrap());
-//     let download_file_result = fs::write(file_path, &params.binary);
-//     match download_file_result {
-//         Ok(_) => {
-//             show_toast(&window, &get_download_message(MessageType::Success));
-//             Ok(())
-//         }
-//         Err(e) => {
-//             show_toast(&window, &get_download_message(MessageType::Failure));
-//             Err(e.to_string())
-//         }
-//     }
-// }
+#[tauri::command]
+pub async fn run_command(command: String) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    let output = tokio::process::Command::new("powershell")
+        .arg("-Command")
+        .arg(&command)
+        .creation_flags(0x08000000)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(not(target_os = "windows"))]
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        #[cfg(target_os = "windows")]
+        {
+            use encoding_rs::GBK;
+            let (decoded, _, _) = GBK.decode(&output.stdout);
+            Ok(decoded.into_owned())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        }
+    } else {
+        #[cfg(target_os = "windows")]
+        {
+            use encoding_rs::GBK;
+            let (decoded, _, _) = GBK.decode(&output.stderr);
+            Err(decoded.into_owned())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Err(String::from_utf8_lossy(&output.stderr).to_string())
+        }
+    }
+}
 
 // following user
 #[tauri::command]
@@ -567,12 +606,224 @@ fn unzip_file(src_path: &str, dst_path: &str) -> std::io::Result<()> {
 
 #[tauri::command]
 pub async fn compress_folder(source: String, destination: String) -> Result<(), String> {
-    println!("source = {source}");
-    println!("destination = {destination}");
     zip_folder(&source, &destination).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn decompress_file(source: String, destination: String) -> Result<(), String> {
     unzip_file(&source, &destination).map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgress {
+    file_id: String,
+    downloaded: u64,
+    total: u64,
+}
+
+#[tauri::command]
+pub async fn download_file(
+    app: AppHandle,
+    url: String,
+    save_path: String,
+    file_id: String,
+) -> Result<(), String> {
+    let client = Client::new();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    // if save path is empty
+    let mut save_path = save_path;
+    let file_name = url.split('/').last().unwrap();
+    if save_path.is_empty() {
+        let file_path = app
+            .path()
+            .resolve(file_name, BaseDirectory::Download)
+            .expect("failed to resolve resource");
+        save_path = file_path.to_str().unwrap().to_string();
+    }
+    let total_size = resp.content_length();
+    let mut stream = resp.bytes_stream();
+    let mut file = File::create(&save_path).map_err(|e| e.to_string())?;
+    let mut downloaded: u64 = 0;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        file.write_all(&chunk).map_err(|e| e.to_string())?;
+        downloaded += chunk.len() as u64;
+        app.emit(
+            "download_progress",
+            DownloadProgress {
+                file_id: file_id.clone(),
+                downloaded,
+                total: total_size.unwrap_or(0),
+            },
+        )
+        .unwrap();
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+pub struct NotificationParams {
+    title: String,
+    body: String,
+    icon: String,
+}
+
+#[tauri::command]
+pub fn notification(app: AppHandle, params: NotificationParams) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(&params.title)
+        .body(&params.body)
+        .icon(&params.icon)
+        .show()
+        .unwrap();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_exe_dir() -> String {
+    let exe_path = env::current_exe().unwrap();
+    let exe_dir = exe_path.parent().unwrap();
+    exe_dir.to_str().unwrap().to_string()
+}
+
+// load man.json
+pub fn load_man(base_dir: &str) -> Result<String, io::Error> {
+    let mut man_path = PathBuf::from(base_dir);
+    man_path.push("config");
+    man_path.push("man");
+    match fs::read_to_string(&man_path) {
+        Ok(man_base64) => match BASE64_STANDARD.decode(man_base64.trim()) {
+            Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
+                Ok(decoded_str) => Ok(decoded_str),
+                Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+            },
+            Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e),
+    }
+}
+
+// server config www dir
+#[tauri::command]
+pub fn get_www_dir(base_dir: &str) -> Result<String, io::Error> {
+    let mut www_dir = PathBuf::from(base_dir);
+    www_dir.push("config");
+    www_dir.push("www");
+    if fs::metadata(&www_dir).is_ok() {
+        let files = fs::read_dir(&www_dir)?;
+        if files.count() > 0 {
+            let port = find_port().unwrap();
+            let route = warp::fs::dir(www_dir);
+            tokio::spawn(async move {
+                warp::serve(route).run(([127, 0, 0, 1], port)).await;
+            });
+            return Ok(format!("http://127.0.0.1:{}", port));
+        } else {
+            return Ok(String::new());
+        }
+    }
+    Ok(String::new())
+}
+
+#[tauri::command]
+pub fn get_env_var(name: String) -> Result<String, String> {
+    std::env::var(name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn find_port() -> Result<u16, String> {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    Ok(port)
+}
+
+#[tauri::command]
+pub fn windows_build(base_dir: &str, exe_name: &str, config: String) -> Result<(), String> {
+    let base_path = Path::new(base_dir).join(exe_name);
+    if !base_path.exists() {
+        fs::create_dir_all(&base_path).map_err(|e| e.to_string())?;
+    }
+    let target_exe_path = base_path.join(format!("{}.exe", exe_name));
+    let exe_path = env::current_exe().unwrap();
+    fs::copy(exe_path, target_exe_path).map_err(|e| e.to_string())?;
+    let config_dir = base_path.join("config");
+    if !config_dir.exists() {
+        fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+    }
+    let man_path = config_dir.join("man");
+    fs::write(man_path, config).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn macos_build(base_dir: &str, exe_name: &str, config: String) -> Result<(), String> {
+    let base_path = Path::new(base_dir).join(exe_name);
+    let app_dir = base_path.join("Contents");
+    if !app_dir.exists() {
+        fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
+    }
+    let macos_dir = base_path.join("Contents/MacOS");
+    let config_dir = base_path.join("Contents/MacOS/config");
+    let resources_dir = base_path.join("Contents/Resources");
+    if !macos_dir.exists() {
+        fs::create_dir_all(&macos_dir).map_err(|e| e.to_string())?;
+    }
+    if !config_dir.exists() {
+        fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+    }
+    if !resources_dir.exists() {
+        fs::create_dir_all(&resources_dir).map_err(|e| e.to_string())?;
+    }
+    let exe_path = env::current_exe().unwrap();
+    let exe_dir = exe_path.parent().unwrap();
+    let exe_parent_dir = exe_dir.parent().unwrap();
+    let info_plist_source = exe_parent_dir.join("Contents/Info.plist");
+    let info_plist_target = base_path.join("Contents/Info.plist");
+    fs::copy(&info_plist_source, &info_plist_target).map_err(|e| e.to_string())?;
+    let pakeplus_app_source = exe_dir.join("PakePlus");
+    let pakeplus_app_target = base_path.join("Contents/MacOS/PakePlus");
+    fs::copy(&pakeplus_app_source, &pakeplus_app_target).map_err(|e| e.to_string())?;
+    let man_path = base_path.join("Contents/MacOS/config/man");
+    fs::write(man_path, config).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn linux_build(base_dir: &str, exe_name: &str, config: String) -> Result<(), String> {
+    Ok(())
+}
+
+#[tauri::command]
+pub fn build_local(
+    handle: AppHandle,
+    target_dir: &str,
+    exe_name: &str,
+    config: WindowConfig,
+) -> Result<(), String> {
+    let resource_path = handle
+        .path()
+        .resolve("data/man.json", BaseDirectory::Resource)
+        .expect("failed to resolve resource");
+    let man_json = fs::read_to_string(&resource_path).map_err(|e| e.to_string())?;
+    let mut man_json =
+        serde_json::from_str::<serde_json::Value>(&man_json).map_err(|e| e.to_string())?;
+    man_json["window"] = serde_json::to_value(config).unwrap();
+    let man_json_base64 = BASE64_STANDARD.encode(man_json.to_string());
+    #[cfg(target_os = "windows")]
+    {
+        windows_build(target_dir, exe_name, man_json_base64).map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_build(target_dir, exe_name, man_json_base64).map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_build(target_dir, exe_name, man_json_base64).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }

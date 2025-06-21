@@ -31,15 +31,12 @@ pub fn run() {
             );
             menu
         })
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            utils::init::show_window(app);
-        }))
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_process::init())
@@ -65,6 +62,16 @@ pub fn run() {
             command::cmds::get_machine_uid,
             command::cmds::compress_folder,
             command::cmds::decompress_file,
+            command::cmds::download_file,
+            command::cmds::notification,
+            command::cmds::run_command,
+            command::cmds::get_env_var,
+            command::cmds::find_port,
+            command::cmds::get_exe_dir,
+            command::cmds::windows_build,
+            command::cmds::macos_build,
+            command::cmds::linux_build,
+            command::cmds::build_local,
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async move {

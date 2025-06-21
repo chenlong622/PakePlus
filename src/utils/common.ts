@@ -8,6 +8,7 @@ import { join } from '@tauri-apps/api/path'
 import { ElMessage } from 'element-plus'
 import CryptoJS from 'crypto-js'
 import QRCode from 'qrcode'
+import { setTheme } from '@tauri-apps/api/app'
 
 // upstream repo info
 export const upstreamUser = import.meta.env.VITE_UPSTREAM_USER
@@ -28,6 +29,8 @@ export const urlMap = {
     ppofficial: 'https://ppofficial.pages.dev/',
     configdoc: 'https://ppofficial.pages.dev/guide/config.html',
     phonedoc: 'https://www.pakeplus.com/guide/phone.html',
+    builddoc: 'https://www.pakeplus.com/guide/build.html',
+    questiondoc: 'https://pakeplus.com/question/',
     pakeplusdev: 'https://pakeplus.pages.dev/',
     weixin: 'https://github.com/Sjj1024/PakePlus',
     qq: '',
@@ -162,6 +165,23 @@ export const initRelease = {
     },
 }
 
+// change theme
+export const chageTheme = async (theme: string) => {
+    if (theme === 'light') {
+        document.documentElement.setAttribute('theme', 'light')
+        document.querySelector('html')?.classList.remove('dark')
+        document.querySelector('html')?.classList.add('light')
+    } else {
+        document.documentElement.setAttribute('theme', 'dark')
+        document.querySelector('html')?.classList.remove('light')
+        document.querySelector('html')?.classList.add('dark')
+    }
+    localStorage.setItem('theme', theme)
+    if (isTauri) {
+        await setTheme(theme === 'light' ? 'light' : 'dark')
+    }
+}
+
 // support pakeplus
 export const supportPP = async () => {
     console.log('supportPP')
@@ -260,12 +280,15 @@ export const buildTime = import.meta.env.BUILD_TIME
 // 是否为tauri环境
 export const isTauri = (window as any).__TAURI__ ? true : false
 
-// 打开url
+// open url or file or path
 export const openUrl = async (url: string) => {
-    if (isTauri) {
+    console.log('url', url)
+    if (isTauri && url) {
         await invoke('open_url', { url })
-    } else {
+    } else if (url) {
         window.open(url, '_blank')
+    } else {
+        ElMessage.error('URL或文件路径不能为空')
     }
 }
 

@@ -370,6 +370,34 @@
                         />
                     </el-select>
                 </el-form-item>
+                <el-form-item
+                    v-if="store.currentProject.desktop.buildMethod === 'local'"
+                    label="保存路径"
+                >
+                    <el-input
+                        v-model.trim="savePath"
+                        autocomplete="off"
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck="false"
+                        placeholder="点击选择，默认保存到下载目录"
+                        @click="savePathHandle('select')"
+                    >
+                        <template #append>
+                            <el-tooltip
+                                class="box-item"
+                                :content="t('staticFile')"
+                                placement="bottom"
+                            >
+                                <el-button
+                                    class="distUpload"
+                                    :icon="FolderOpened"
+                                    @click="savePathHandle('open')"
+                                />
+                            </el-tooltip>
+                        </template>
+                    </el-input>
+                </el-form-item>
                 <!-- platform select -->
                 <el-form-item :label="t('pubPlatform')">
                     <el-tree-select
@@ -398,27 +426,33 @@
                         <el-radio :value="true">{{ t('openDebug') }}</el-radio>
                     </el-radio-group>
                 </el-form-item>
-                <el-form-item :label="t('releaseNotes')">
-                    <el-input
-                        v-model="store.currentProject.desktop.pubBody"
-                        type="textarea"
-                        autocomplete="off"
-                        autoCapitalize="off"
-                        autoCorrect="off"
-                        spellCheck="false"
-                        :placeholder="t('inputRelNotes')"
-                    />
-                </el-form-item>
+                <el-scrollbar>
+                    <el-form-item :label="t('releaseNotes')">
+                        <el-input
+                            v-model="store.currentProject.desktop.pubBody"
+                            type="textarea"
+                            disabled
+                            autocomplete="off"
+                            autoCapitalize="off"
+                            autoCorrect="off"
+                            spellCheck="false"
+                            :placeholder="t('inputRelNotes')"
+                        />
+                    </el-form-item>
+                </el-scrollbar>
             </el-form>
-            <span style="color: #aaa">
-                {{ t('pubNotesTips') }}
+            <span class="pubNotesTips">
+                <span>{{ t('pubNotesTips') }}</span>
+                <el-icon @click="openUrl(urlMap.builddoc)" class="readIcon">
+                    <ReadingLamp />
+                </el-icon>
             </span>
             <template #footer>
                 <div class="dialog-footer">
                     <el-button @click="centerDialogVisible = false">
                         {{ t('cancel') }}
                     </el-button>
-                    <el-button type="primary" @click="publishWeb">
+                    <el-button type="primary" @click="publishCheck">
                         {{ t('confirm') }}
                     </el-button>
                 </div>
@@ -465,7 +499,12 @@
                     </h4>
                 </div>
             </template>
-            <CodeEdit ref="codeEditRef" lang="javascript" />
+            <CodeEdit
+                ref="codeEditRef"
+                lang="javascript"
+                height="400px"
+                :code="store.currentProject.customJs"
+            />
         </el-dialog>
         <!-- img preview -->
         <ImgPreview
@@ -492,8 +531,14 @@ import {
     readTextFile,
     writeTextFile,
     exists,
+    remove,
 } from '@tauri-apps/plugin-fs'
-import { appDataDir, join } from '@tauri-apps/api/path'
+import {
+    appCacheDir,
+    appDataDir,
+    downloadDir,
+    join,
+} from '@tauri-apps/api/path'
 import { basename } from '@tauri-apps/api/path'
 import {
     ArrowLeft,
@@ -507,6 +552,8 @@ import {
     Paperclip,
     Document,
     Cellphone,
+    FolderOpened,
+    ReadingLamp,
 } from '@element-plus/icons-vue'
 import CutterImg from '@/components/CutterImg.vue'
 import CodeEdit from '@/components/CodeEdit.vue'
@@ -541,6 +588,7 @@ import { arch, platform } from '@tauri-apps/plugin-os'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import TauriConfig from '@/components/TauriConfig.vue'
 import ImgPreview from '@/components/ImgPreview.vue'
+import { listen } from '@tauri-apps/api/event'
 
 const route = useRoute()
 const router = useRouter()
@@ -697,6 +745,8 @@ const methodOptions = [
         disabled: true,
     },
 ]
+
+// platform map
 const platformMap: any = {
     macosaarch64: ['2-2'],
     macosx86_64: ['2-1'],
@@ -714,6 +764,29 @@ const methodChange = (value: string) => {
         store.currentProject.platform = platformMap[platformName + archName]
     } else {
         store.currentProject.platform = ['1-1', '1-2', '2-1', '2-2']
+    }
+}
+
+// save path
+const savePath = ref('')
+const savePathHandle = async (handle: string) => {
+    if (handle) {
+        if (savePath.value && handle === 'open') {
+            openUrl(savePath.value)
+        } else {
+            const selected: any = await openSelect(true, [])
+            console.log('selected', selected)
+            if (selected) {
+                savePath.value = selected
+            }
+        }
+    } else {
+        // check path
+        const isExists = await exists(savePath.value)
+        if (!isExists) {
+            oneMessage.error('路径不存在')
+            return
+        }
     }
 }
 
@@ -903,7 +976,6 @@ const fileToBase64 = (file: any) => {
 
 // loadHtml
 const loadHtml = async () => {
-    console.log('loadHtml')
     store.currentProject.isHtml = true
     const selected = await openSelect(true, [])
     console.log('selected', selected)
@@ -978,9 +1050,9 @@ const activeDistInput = async () => {
     if (isTauri) {
         try {
             const res = await invoke('stop_server')
-            console.log('stopServer', res)
+            console.log('activeDistInput stopServer', res)
         } catch (error) {
-            console.error('Failed to stop server:', error)
+            console.error('activeDistInput Failed to stop server:', error)
         }
         loadHtml()
     } else {
@@ -997,14 +1069,22 @@ const activeDistInput = async () => {
 const stopServer = async () => {
     if (isTauri) {
         try {
+            const cacheDir = await appCacheDir()
+            const cacheExist = await exists(cacheDir)
+            cacheExist && (await remove(cacheDir, { recursive: true }))
+        } catch (error) {
+            console.error('Failed to remove cache:', error)
+        }
+        try {
             const res = await invoke('stop_server')
-            console.log('stopServer', res)
+            console.log('stop server', res)
         } catch (error) {
             console.error('Failed to stop server:', error)
         }
-        store.actionSecond()
     }
 }
+// close preview window and stop server
+listen('stop_server', stopServer)
 
 // handle file change
 const handleFileChange = async (event: any) => {
@@ -1551,15 +1631,20 @@ const updateTauriConfig = async () => {
     }
 }
 
+// local publish
+const easyLocal = async () => {
+    console.log('easyLocal')
+    const targetDir = savePath.value || (await downloadDir())
+    // build local
+    invoke('build_local', {
+        targetDir: targetDir,
+        exeName: store.currentProject.showName,
+        config: store.currentProject.more.windows,
+    })
+}
+
 // new publish version
 const publishWeb = async () => {
-    if (store.token === '') {
-        oneMessage.error(t('configToken'))
-        return
-    } else if (checkLastPublish()) {
-        oneMessage.error(t('limitProject'))
-        return
-    }
     //  else if (store.currentProject.platform.length === 0) {
     //     oneMessage.error(t('selectPlatform'))
     //     return
@@ -1602,6 +1687,28 @@ const publishWeb = async () => {
             'build error',
             'PakePlus'
         )
+        ElMessageBox.confirm('跳转到常见问题查看解决办法', '发布失败', {
+            confirmButtonText: 'OK',
+            type: 'warning',
+            center: true,
+        }).finally(() => {
+            openUrl(urlMap.questiondoc)
+        })
+    }
+}
+
+// publish check
+const publishCheck = async () => {
+    if (store.currentProject.desktop.buildMethod === 'local') {
+        await easyLocal()
+    } else if (store.token === '') {
+        oneMessage.error(t('configToken'))
+        return
+    } else if (checkLastPublish()) {
+        oneMessage.error(t('limitProject'))
+        return
+    } else {
+        publishWeb()
     }
 }
 
@@ -1626,7 +1733,7 @@ const dispatchAction = async () => {
             ? dispatchRes.data.message
             : dispatchRes.status
         warning.value = t('dispatchError') + ': ' + message
-        oneMessage.error(warning.value)
+        // oneMessage.error(warning.value)
         createIssue(
             store.currentProject.name,
             store.currentProject.showName,
@@ -1637,7 +1744,7 @@ const dispatchAction = async () => {
             'PakePlus'
         )
         buildLoading.value = false
-        return
+        throw new Error(t('dispatchError') + ': ' + message)
     } else {
         buildSecondTimer = setInterval(() => {
             buildTime += 1
@@ -1826,6 +1933,7 @@ onMounted(async () => {
         // initJsFileContents()
         const window = getCurrentWindow()
         window.setTitle(`${store.currentProject.name}`)
+        methodChange('local')
     }
     console.log('route.query', route.query)
     const delrelease = route.query.delrelease
@@ -2117,6 +2225,21 @@ onMounted(async () => {
     align-items: center;
     font-size: 18px;
     font-weight: bold;
+    // margin-right: 4px;
+}
+
+.pubNotesTips {
+    color: #aaa;
+
+    .readIcon {
+        cursor: pointer;
+        margin-left: 2px;
+        vertical-align: middle;
+        margin-bottom: 2px;
+        &:hover {
+            color: var(--text-color);
+        }
+    }
 }
 </style>
 
